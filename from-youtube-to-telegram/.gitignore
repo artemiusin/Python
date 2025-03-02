@@ -1,0 +1,7 @@
+api_key_google.py
+
+# Кэш Python
+__pycache__/
+
+# Виртуальное окружение
+myenv/
