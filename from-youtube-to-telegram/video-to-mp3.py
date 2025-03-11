@@ -16,10 +16,10 @@ from api_key_google import api_key
 API_KEY = api_key  # Replace with your API key
 DEFAULT_OUTPUT = "youtube_audio"
 MAX_RETRIES = 3
-REQUEST_TIMEOUT = 30
+REQUEST_TIMEOUT = 60
 
 class YouTubeDownloader:
-    def __init__(self, proxy: str = None):
+    def __init__(self, proxy: str = None, cookies_file: str = None):
         self.ua = UserAgent()
         self.ydl_opts = {
             'format': 'bestaudio/best',
@@ -33,6 +33,8 @@ class YouTubeDownloader:
             'socket_timeout': REQUEST_TIMEOUT,
             'http_headers': {'User-Agent': self.ua.random},
             'nocheckcertificate': True,  # Add this line
+            'age_limit': 99, # Add this line to bypass age restrictions
+            'cookies': cookies_file if cookies_file else None # Add cookies file
         }
         
         # Removing PySocks configuration
@@ -124,8 +126,9 @@ class YouTubeDownloader:
 def main():
     proxy = input("Enter proxy (optional, format http://ip:port or socks5://ip:port): ") or None  # Updated format description
     channel_id = input("Enter YouTube channel ID: ")
-    
-    downloader = YouTubeDownloader(proxy)
+    cookies_file = input("Enter path to cookies file (optional): ") or None
+
+    downloader = YouTubeDownloader(proxy, cookies_file)
     
     if not os.path.exists(DEFAULT_OUTPUT):
         os.makedirs(DEFAULT_OUTPUT)
