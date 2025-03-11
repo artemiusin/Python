@@ -5,3 +5,6 @@ __pycache__/
 
 # Виртуальное окружение
 myenv/
+
+# Youtube audio
+youtube_audio/
