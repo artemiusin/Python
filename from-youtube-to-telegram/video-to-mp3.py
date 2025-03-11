@@ -1,128 +1,167 @@
-import googleapiclient.discovery
-from pytube import YouTube
 import os
-import ffmpeg
-from tqdm import tqdm
-import time
 import random
-from pytube import exceptions  # Импортируем исключения pytube
-
-# Замените на ваш API ключ
+import time
+from typing import List, Tuple
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+import yt_dlp
+from tqdm import tqdm
+from tenacity import retry, stop_after_attempt, wait_exponential
+from fake_useragent import UserAgent
+import socket
+# import socks  # Removing socks import and usage
 from api_key_google import api_key
 
-def get_channel_videos(api_key, channel_id):
-    youtube = googleapiclient.discovery.build("youtube", "v3", developerKey=api_key)
+# Configuration
+API_KEY = api_key  # Replace with your API key
+DEFAULT_OUTPUT = "youtube_audio"
+MAX_RETRIES = 3
+REQUEST_TIMEOUT = 30
 
-    # Получаем ID плейлиста с загруженными видео канала
-    request = youtube.channels().list(
-        part="contentDetails",
-        id=channel_id
-    )
-    response = request.execute()
+class YouTubeDownloader:
+    def __init__(self, proxy: str = None):
+        self.ua = UserAgent()
+        self.ydl_opts = {
+            'format': 'bestaudio/best',
+            'extract_audio': True,
+            'audioformat': 'mp3',
+            'audioquality': '192k',
+            'outtmpl': os.path.join(DEFAULT_OUTPUT, '%(title)s.%(ext)s'),
+            'quiet': True,
+            'no_warnings': False,
+            'proxy': proxy,
+            'socket_timeout': REQUEST_TIMEOUT,
+            'http_headers': {'User-Agent': self.ua.random},
+            'nocheckcertificate': True,  # Add this line
+        }
+        
+        # Removing PySocks configuration
+        # if proxy:
+        #     self._configure_proxy(proxy)
 
-    if not response['items']:
-        print("Канал не найден.")
-        return []
+    # Removing _configure_proxy method
+    # def _configure_proxy(self, proxy: str):
+    #     """Configure proxy for all connections"""
+    #     try:
+    #         proxy_type, proxy_host, proxy_port = self._parse_proxy(proxy)
+    #         socks.set_default_proxy(proxy_type, proxy_host, proxy_port)
+    #         socket.socket = socks.socksocket
+    #     except Exception as e:
+    #         print(f"Error setting up proxy: {e}")
 
-    uploads_playlist_id = response['items'][0]['contentDetails']['relatedPlaylists']['uploads']
+    # Removing _parse_proxy method
+    # @staticmethod
+    # def _parse_proxy(proxy: str) -> Tuple:
+    #     """Parse proxy string"""
+    #     parts = proxy.split('://')
+    #     proxy_type = parts[0].upper()
+    #     host_port = parts[1].split(':')
+    #     return {
+    #         'SOCKS5': socks.SOCKS5,
+    #         'SOCKS4': socks.SOCKS4,
+    #         'HTTP': socks.HTTP
+    #     }[proxy_type], host_port[0], int(host_port[1])
 
-    # Получаем все видео из плейлиста
-    videos = []
-    next_page_token = None
-
-    while True:
-        request = youtube.playlistItems().list(
-            part="snippet",
-            playlistId=uploads_playlist_id,
-            maxResults=50,
-            pageToken=next_page_token
-        )
+    @retry(stop=stop_after_attempt(MAX_RETRIES), wait=wait_exponential(multiplier=1))
+    def download_audio(self, url: str) -> str:
+        """Download audio with retry"""
         try:
-            response = request.execute()
-        except googleapiclient.errors.HttpError as e:
-            print(f"Ошибка при получении списка видео: {e}")
-            break
+            with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                if info and 'title' in info:
+                    return os.path.join(DEFAULT_OUTPUT, f"{info['title']}.mp3")
+                else:
+                    print("Failed to retrieve video information")
+                    return None
+        except Exception as e:
+            print(f"\nDownload error: {str(e)}")
+            raise
 
-        for item in response['items']:
-            video_title = item['snippet']['title']
-            video_id = item['snippet']['resourceId']['videoId']
-            video_url = f"https://www.youtube.com/watch?v={video_id}"
-            videos.append((video_title, video_url))
+    def get_channel_videos(self, channel_id: str) -> List[Tuple[str, str]]:
+        """Get list of videos via YouTube API"""
+        youtube = build('youtube', 'v3', developerKey=API_KEY)
+        
+        try:
+            channel_info = youtube.channels().list(
+                part="contentDetails",
+                id=channel_id
+            ).execute()
+            
+            if not channel_info['items']:
+                raise ValueError("Channel not found")
+                
+            playlist_id = channel_info['items'][0]['contentDetails']['relatedPlaylists']['uploads']
+            videos = []
+            next_page_token = None
 
-        next_page_token = response.get('nextPageToken')
+            while True:
+                playlist_items = youtube.playlistItems().list(
+                    part="snippet",
+                    playlistId=playlist_id,
+                    maxResults=50,
+                    pageToken=next_page_token
+                ).execute()
 
-        if not next_page_token:
-            break
+                for item in playlist_items['items']:
+                    video_id = item['snippet']['resourceId']['videoId']
+                    videos.append((
+                        item['snippet']['title'],
+                        f"https://youtube.com/watch?v={video_id}"
+                    ))
 
-    return videos
+                next_page_token = playlist_items.get('nextPageToken')
+                if not next_page_token:
+                    break
 
-def download_and_convert_to_mp3(video_url, output_path="output"):
-    try:
-        # Скачиваем видео
-        yt = YouTube(video_url)
-        video = yt.streams.filter(only_audio=True).first()
-        if video:
-            video_file = video.download(output_path)
+                time.sleep(random.uniform(1, 3))  # Delay between requests
 
-            # Конвертируем видео в MP3 с помощью ffmpeg
-            mp3_file = os.path.join(output_path, os.path.splitext(os.path.basename(video_file))[0] + ".mp3")
-            try:
-                ffmpeg.input(video_file).output(mp3_file).run(overwrite_output=True)
-            except ffmpeg.Error as e:
-                print(f"Ошибка при конвертации видео {video_url} в MP3: {e.stderr.decode()}")
-                return None
+            return videos
 
-            # Удаляем временный видео файл
-            os.remove(video_file)
-
-            return mp3_file
-        else:
-            print(f"Аудиопоток не найден для видео: {video_url}")
-            return None
-    except exceptions.RegexMatchError as e:
-        print(f"Ошибка RegexMatchError при обработке видео {video_url}: {e}")
-        return None
-    except exceptions.VideoUnavailable as e:
-        print(f"Видео недоступно {video_url}: {e}")
-        return None
-    except exceptions.AgeRestrictedError as e:
-        print(f"Возрастное ограничение для видео {video_url}: {e}")
-        return None
-    except exceptions.LiveStreamError as e:
-        print(f"Это прямая трансляция {video_url}: {e}")
-        return None
-    except Exception as e:
-        print(f"Ошибка при обработке видео {video_url}: {e}")
-        return None
+        except HttpError as e:
+            print(f"API Error: {e.resp.status} {e._get_reason()}")
+            return []
 
 def main():
-    channel_id = input("Введите ID канала YouTube: ")
-    output_path = input("Введите путь для сохранения MP3 файлов (по умолчанию 'output'): ") or "output"
+    proxy = input("Enter proxy (optional, format http://ip:port or socks5://ip:port): ") or None  # Updated format description
+    channel_id = input("Enter YouTube channel ID: ")
+    
+    downloader = YouTubeDownloader(proxy)
+    
+    if not os.path.exists(DEFAULT_OUTPUT):
+        os.makedirs(DEFAULT_OUTPUT)
 
-    # Создаем директорию, если она не существует
-    if not os.path.exists(output_path):
-        os.makedirs(output_path)
+    try:
+        print("\n[1/3] Getting video list...")
+        videos = downloader.get_channel_videos(channel_id)
+        
+        if not videos:
+            print("No videos found for download")
+            return
 
-    videos = get_channel_videos(api_key, channel_id)
+        print(f"[2/3] Found {len(videos)} videos. Starting download...")
+        
+        success = 0
+        progress_bar = tqdm(videos, desc="Downloading", unit=" video")
+        
+        for title, url in progress_bar:
+            progress_bar.set_postfix_str(f"Processing: {title[:30]}...")
+            
+            try:
+                time.sleep(random.uniform(2, 10))  # Random delay
+                file_path = downloader.download_audio(url)
+                if file_path:
+                    success += 1
+                    tqdm.write(f"Success: {os.path.basename(file_path)}")
+                else:
+                    tqdm.write(f"Failed to process: {title}")
+            except Exception as e:
+                tqdm.write(f"Error: {title} - {str(e)}")
+                continue
 
-    if videos:
-        print(f"\nВсего видео на канале: {len(videos)}")
-        print("\nНачинаем скачивание и конвертацию...")
+        print(f"\n[3/3] Complete! Successfully downloaded {success}/{len(videos)} audio files")
 
-        # Используем tqdm для отображения прогресс-бара
-        for title, url in tqdm(videos, desc="Обработка видео", unit="видео"):
-            print(f"\nОбработка видео: {title}")
-            # Добавляем случайную задержку перед каждой загрузкой
-            time.sleep(random.randint(1, 5))  # Задержка от 1 до 5 секунд
-            mp3_file = download_and_convert_to_mp3(url, output_path)
-            if mp3_file:
-                print(f"Успешно: {mp3_file}")
-            else:
-                print(f"Ошибка при обработке видео: {title}")
-
-        print("\nВсе видео обработаны!")
-    else:
-        print("На канале нет видео.")
+    except KeyboardInterrupt:
+        print("\nInterrupted by user")
 
 if __name__ == "__main__":
     main()
